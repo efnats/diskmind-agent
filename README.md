@@ -9,7 +9,7 @@ Collects SMART data from your drives via `smartctl` and pushes it to your diskmi
 ```bash
 sudo curl -sSL -o /usr/local/bin/diskmind_scan https://raw.githubusercontent.com/efnats/diskmind-agent/main/diskmind_scan
 sudo chmod +x /usr/local/bin/diskmind_scan
-sudo diskmind_scan --push https://diskmind.net
+sudo diskmind_scan --push
 ```
 
 On first run, you'll be prompted for your API token. Sign up at [diskmind.net](https://diskmind.net) and find it under **Settings > API Tokens**.
@@ -17,7 +17,7 @@ On first run, you'll be prompted for your API token. Sign up at [diskmind.net](h
 ## Automate with cron
 
 ```bash
-echo "*/15 * * * * root /usr/local/bin/diskmind_scan --push https://diskmind.net --log /var/log/diskmind.log" | sudo tee /etc/cron.d/diskmind
+echo "*/15 * * * * root /usr/local/bin/diskmind_scan --push --log /var/log/diskmind.log" | sudo tee /etc/cron.d/diskmind
 ```
 
 ## Requirements
@@ -32,12 +32,20 @@ echo "*/15 * * * * root /usr/local/bin/diskmind_scan --push https://diskmind.net
 ```
 diskmind_scan [OPTIONS]
 
-  --push URL         Server URL (e.g. https://diskmind.net)
+  --push [URL]       Push data to server (default: https://diskmind.net)
   --host HOSTNAME    Override hostname (default: system hostname)
   --token TOKEN      API token (also reads from /etc/diskmind/token)
   --log FILE         Log to file with timestamps (for cron)
   --buffer-dir DIR   Buffer directory for offline scans
                      (default: /var/lib/diskmind/buffer)
+```
+
+## Self-hosted
+
+If you run your own diskmind server, point `--push` at it:
+
+```bash
+sudo diskmind_scan --push http://your-server:8085
 ```
 
 ## How it works
