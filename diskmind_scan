@@ -88,23 +88,83 @@ if [ -z "$PUSH_TOKEN" ] && [ -f "$TOKEN_FILE" ] && [ -r "$TOKEN_FILE" ]; then
     PUSH_TOKEN="$(tr -d '[:space:]' < "$TOKEN_FILE")"
 fi
 
-# Interactive setup: prompt for token when push mode active but no token available
+# Interactive setup: device authorization flow when push mode active but no token
 if [ -n "$PUSH_URL" ] && [ -z "$PUSH_TOKEN" ]; then
     if [ -t 0 ]; then
-        printf "\n  No API token found.\n"
-        printf "  Sign up at https://diskmind.net and go to\n"
-        printf "  Settings → API Tokens to get one.\n\n"
-        read -rp "  Token: " input_token
-        input_token="$(echo "$input_token" | tr -d '[:space:]')"
-        if [ -z "$input_token" ]; then
-            printf "\n  No token entered.\n\n"
-            exit 1
+        # Try device authorization flow first
+        _device_response=$(curl -s -w "\n%{http_code}" -X POST \
+            -H "Content-Type: application/json" \
+            --connect-timeout 10 \
+            --max-time 15 \
+            -d "{\"hostname\": \"$(hostname)\"}" \
+            "${PUSH_URL}/api/device/code" 2>&1)
+        _device_http=$(echo "$_device_response" | tail -1)
+        _device_body=$(echo "$_device_response" | sed '$d')
+
+        if [ "$_device_http" = "200" ] && echo "$_device_body" | grep -q '"user_code"'; then
+            # Extract user_code and device_code from JSON
+            _user_code=$(echo "$_device_body" | sed 's/.*"user_code"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
+            _device_code=$(echo "$_device_body" | sed 's/.*"device_code"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
+
+            # Build link URL (strip trailing slash, add /link)
+            _link_url=$(echo "$PUSH_URL" | sed 's|/$||')/link
+
+            printf "\n  ${BOLD}Link your server to diskmind${NC}\n\n"
+            printf "  1. Open ${BOLD}%s${NC}\n" "$_link_url"
+            printf "  2. Enter code: ${BOLD}%s${NC}\n\n" "$_user_code"
+            printf "  Waiting for authorization..."
+
+            _poll_start=$(date +%s)
+            _authorized=0
+            while true; do
+                sleep 5
+                _elapsed=$(( $(date +%s) - _poll_start ))
+                if [ "$_elapsed" -ge 600 ]; then
+                    printf "\r  ${RED}Timed out${NC} — run again to get a new code.\n\n"
+                    exit 1
+                fi
+
+                _verify_response=$(curl -s -w "\n%{http_code}" -X POST \
+                    -H "Content-Type: application/json" \
+                    --connect-timeout 10 \
+                    --max-time 15 \
+                    -d "{\"device_code\": \"${_device_code}\"}" \
+                    "${PUSH_URL}/api/device/verify" 2>&1)
+                _verify_http=$(echo "$_verify_response" | tail -1)
+                _verify_body=$(echo "$_verify_response" | sed '$d')
+
+                if [ "$_verify_http" = "200" ] && echo "$_verify_body" | grep -q '"token"'; then
+                    _received_token=$(echo "$_verify_body" | sed 's/.*"token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
+                    PUSH_TOKEN="$_received_token"
+                    mkdir -p /etc/diskmind
+                    printf '%s\n' "$_received_token" > "$TOKEN_FILE"
+                    chmod 600 "$TOKEN_FILE"
+                    printf "\r  ${GREEN}Authorized!${NC} Token saved to %s\n\n" "$TOKEN_FILE"
+                    _authorized=1
+                    break
+                elif [ "$_verify_http" = "410" ]; then
+                    printf "\r  ${RED}Code expired${NC} — run again to get a new code.\n\n"
+                    exit 1
+                fi
+                # 428 = still pending, keep polling
+            done
+        else
+            # Server doesn't support device flow — fall back to manual token prompt
+            printf "\n  No API token found.\n"
+            printf "  Sign up at %s and go to\n" "$PUSH_URL"
+            printf "  Settings → API Tokens to get one.\n\n"
+            read -rp "  Token: " input_token
+            input_token="$(echo "$input_token" | tr -d '[:space:]')"
+            if [ -z "$input_token" ]; then
+                printf "\n  No token entered.\n\n"
+                exit 1
+            fi
+            PUSH_TOKEN="$input_token"
+            mkdir -p /etc/diskmind
+            printf '%s\n' "$input_token" > "$TOKEN_FILE"
+            chmod 600 "$TOKEN_FILE"
+            printf "  Token saved to %s\n\n" "$TOKEN_FILE"
         fi
-        PUSH_TOKEN="$input_token"
-        mkdir -p /etc/diskmind
-        printf '%s\n' "$input_token" > "$TOKEN_FILE"
-        chmod 600 "$TOKEN_FILE"
-        printf "  Token saved to %s\n\n" "$TOKEN_FILE"
     else
         echo "No API token. Run interactively to configure, or pass --token." >&2
         exit 1
