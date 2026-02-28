@@ -1,0 +1,549 @@
+#!/bin/bash
+# diskmind_scan - Node Agent
+# Outputs SMART data as CSV to stdout, or pushes to server with --push
+
+VERSION="2.2"
+COMMIT=""
+
+# OS detection
+OS_TYPE="$(uname -s)"
+
+# Colors (only when stderr is a terminal)
+if [ -t 2 ]; then
+    GREEN='\033[0;32m'
+    RED='\033[0;31m'
+    YELLOW='\033[1;33m'
+    BOLD='\033[1m'
+    DIM='\033[2m'
+    NC='\033[0m'
+else
+    GREEN='' RED='' YELLOW='' BOLD='' DIM='' NC=''
+fi
+
+# Parse arguments
+PUSH_URL=""
+HOST_ID=""
+LOG_FILE=""
+PUSH_TOKEN=""
+case "$OS_TYPE" in
+    Darwin) BUFFER_DIR="$HOME/Library/Application Support/diskmind/buffer" ;;
+    *)      BUFFER_DIR="/var/lib/diskmind/buffer" ;;
+esac
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --push)
+            PUSH_URL="$2"
+            shift 2
+            ;;
+        --host)
+            HOST_ID="$2"
+            shift 2
+            ;;
+        --token)
+            PUSH_TOKEN="$2"
+            shift 2
+            ;;
+        --log)
+            LOG_FILE="$2"
+            shift 2
+            ;;
+        --buffer-dir)
+            BUFFER_DIR="$2"
+            shift 2
+            ;;
+        --help|-h)
+            echo "Usage: diskmind_scan [--push URL] [--host HOSTNAME] [--token TOKEN] [--log FILE] [--buffer-dir DIR]"
+            echo ""
+            echo "Collects SMART data from local disks."
+            echo ""
+            echo "Options:"
+            echo "  --push URL       Push data to diskmind server instead of stdout"
+            echo "                   Example: --push http://192.168.1.100:8085"
+            echo "  --host HOST      Host identifier for push mode (default: hostname)"
+            echo "                   Use IP if that's what's in your diskmind config"
+            echo "  --token TOKEN    Push authentication token"
+            echo "                   Also reads from /etc/diskmind/token"
+            echo "  --log FILE       Log output to file with timestamp (for cron)"
+            echo "  --buffer-dir DIR Directory for buffering data when server offline"
+            echo "                   (default: /var/lib/diskmind/buffer)"
+            echo ""
+            echo "Without --push, outputs CSV to stdout."
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1" >&2
+            exit 1
+            ;;
+    esac
+done
+
+# Read token from file if not provided via --token
+TOKEN_FILE="/etc/diskmind/token"
+if [ -z "$PUSH_TOKEN" ] && [ -f "$TOKEN_FILE" ] && [ -r "$TOKEN_FILE" ]; then
+    PUSH_TOKEN="$(tr -d '[:space:]' < "$TOKEN_FILE")"
+fi
+
+# Interactive setup: prompt for token when push mode active but no token available
+if [ -n "$PUSH_URL" ] && [ -z "$PUSH_TOKEN" ]; then
+    if [ -t 0 ]; then
+        printf "\n  No API token found.\n"
+        printf "  Sign up at https://diskmind.net and go to\n"
+        printf "  Settings → API Tokens to get one.\n\n"
+        read -rp "  Token: " input_token
+        input_token="$(echo "$input_token" | tr -d '[:space:]')"
+        if [ -z "$input_token" ]; then
+            printf "\n  No token entered.\n\n"
+            exit 1
+        fi
+        PUSH_TOKEN="$input_token"
+        mkdir -p /etc/diskmind
+        printf '%s\n' "$input_token" > "$TOKEN_FILE"
+        chmod 600 "$TOKEN_FILE"
+        printf "  Token saved to %s\n\n" "$TOKEN_FILE"
+    else
+        echo "No API token. Run interactively to configure, or pass --token." >&2
+        exit 1
+    fi
+fi
+
+# Logging function
+log() {
+    if [ -n "$LOG_FILE" ]; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG_FILE"
+    else
+        echo "$*"
+    fi
+}
+
+log_error() {
+    if [ -n "$LOG_FILE" ]; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: $*" >> "$LOG_FILE"
+    else
+        echo "$*" >&2
+    fi
+}
+
+# Send CSV data to server, return 0 on success
+send_to_server() {
+    local csv_data="$1"
+    local scan_ts="${2:-}"  # Optional: original scan timestamp (ISO format)
+    local http_code response body
+    
+    # Build headers
+    local auth_args=()
+    if [ -n "$PUSH_TOKEN" ]; then
+        auth_args+=(-H "Authorization: Bearer ${PUSH_TOKEN}")
+    fi
+    if [ -n "$scan_ts" ]; then
+        auth_args+=(-H "X-Scan-Timestamp: ${scan_ts}")
+    fi
+    
+    response=$(echo "$csv_data" | curl -s -w "\n%{http_code}" -X POST \
+        -H "Content-Type: text/csv" \
+        "${auth_args[@]}" \
+        --connect-timeout 10 \
+        --max-time 30 \
+        --data-binary @- \
+        "${PUSH_URL}/api/ingest?host=${HOST_ID}" 2>&1)
+    
+    if [ $? -ne 0 ]; then
+        LAST_ERROR="Server unreachable"
+        return 1
+    fi
+    
+    # Split response: last line is HTTP code, rest is body
+    http_code=$(echo "$response" | tail -1)
+    body=$(echo "$response" | sed '$d')
+    
+    if echo "$body" | grep -q '"success"'; then
+        LAST_DISK_COUNT=$(echo "$body" | sed 's/.*"disks"[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/')
+        return 0
+    fi
+    
+    # Extract error message from JSON response
+    local server_error
+    server_error=$(echo "$body" | sed 's/.*"error"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
+    
+    case "$http_code" in
+        401) LAST_ERROR="Authentication failed — check your token" ;;
+        403) LAST_ERROR="Access denied — ${server_error}" ;;
+        400) LAST_ERROR="Invalid data — ${server_error}" ;;
+        429) LAST_ERROR="Too many requests — try again later" ;;
+        502|503|504) LAST_ERROR="Server is temporarily unavailable" ;;
+        *)   LAST_ERROR="Server responded with an error (HTTP ${http_code})" ;;
+    esac
+    
+    # Return 2 for rejected (don't buffer), 1 for unreachable/rate-limited (buffer)
+    if [ "$http_code" = "401" ] || [ "$http_code" = "403" ]; then
+        return 2
+    fi
+    return 1
+}
+
+# Buffer data to disk
+buffer_data() {
+    local csv_data="$1"
+    mkdir -p "$BUFFER_DIR"
+    local filename="${BUFFER_DIR}/$(date '+%Y%m%d_%H%M%S')_$$.csv"
+    echo "$csv_data" > "$filename"
+    log "Buffered data to $filename"
+}
+
+# Send all buffered data in a single batch request
+send_buffered() {
+    [ ! -d "$BUFFER_DIR" ] && return 0
+
+    # Collect all buffered files into a single payload
+    # Format: #TS:<timestamp>\n<csv data>\n#TS:<timestamp>\n<csv data>...
+    local payload=""
+    local files=()
+    local count=0
+
+    shopt -s nullglob
+    for file in "$BUFFER_DIR"/*.csv; do
+        [ -f "$file" ] || continue
+
+        # Extract original scan timestamp from filename (YYYYMMDD_HHMMSS_PID.csv)
+        local bn
+        bn=$(basename "$file" .csv)
+        local scan_ts
+        scan_ts=$(echo "$bn" | sed 's/^\([0-9]\{4\}\)\([0-9]\{2\}\)\([0-9]\{2\}\)_\([0-9]\{2\}\)\([0-9]\{2\}\)\([0-9]\{2\}\).*/\1-\2-\3 \4:\5:\6/')
+
+        if [ -n "$payload" ]; then
+            payload="$payload"$'\n'
+        fi
+        payload="${payload}#TS:${scan_ts}"$'\n'"$(cat "$file")"
+        files+=("$file")
+        ((count++))
+    done
+    shopt -u nullglob
+
+    if [ $count -eq 0 ]; then
+        BUFFERED_SENT=0
+        return 0
+    fi
+
+    # Send batch
+    local auth_args=()
+    if [ -n "$PUSH_TOKEN" ]; then
+        auth_args+=(-H "Authorization: Bearer ${PUSH_TOKEN}")
+    fi
+
+    local response http_code body
+    response=$(echo "$payload" | curl -s -w "\n%{http_code}" -X POST \
+        -H "Content-Type: text/csv" \
+        "${auth_args[@]}" \
+        --connect-timeout 10 \
+        --max-time 60 \
+        --data-binary @- \
+        "${PUSH_URL}/api/ingest/batch?host=${HOST_ID}" 2>&1)
+
+    if [ $? -ne 0 ]; then
+        BUFFERED_SENT=0
+        return 1
+    fi
+
+    http_code=$(echo "$response" | tail -1)
+    body=$(echo "$response" | sed '$d')
+
+    if echo "$body" | grep -q '"success"'; then
+        # Delete all sent files
+        for file in "${files[@]}"; do
+            rm -f "$file"
+        done
+        BUFFERED_SENT=$count
+        log "Sent $count buffered scan(s) in batch"
+        return 0
+    fi
+
+    # Auth rejected — delete files, no point retrying
+    if [ "$http_code" = "401" ] || [ "$http_code" = "403" ]; then
+        for file in "${files[@]}"; do
+            rm -f "$file"
+        done
+        BUFFERED_SENT=0
+        return 2
+    fi
+
+    BUFFERED_SENT=0
+    return 1
+}
+
+# Use sudo for smartctl if not running as root
+# Use absolute path for cron compatibility
+if command -v smartctl >/dev/null 2>&1; then
+    SMARTCTL_BIN="$(command -v smartctl)"
+else
+    case "$OS_TYPE" in
+        Darwin) SMARTCTL_BIN="/opt/homebrew/bin/smartctl"
+                [ -x "$SMARTCTL_BIN" ] || SMARTCTL_BIN="/usr/local/bin/smartctl" ;;
+        *)      SMARTCTL_BIN="/usr/sbin/smartctl" ;;
+    esac
+fi
+if [ "$(id -u)" -eq 0 ]; then
+    SMARTCTL="$SMARTCTL_BIN"
+else
+    SMARTCTL="sudo $SMARTCTL_BIN"
+fi
+
+# Function to collect data and output CSV
+collect_data() {
+    # CSV Header
+    echo "wwn,serial,device,type,model,capacity_bytes,firmware,rpm,sector_size,smart_status,smart_attributes"
+
+    # Discover devices via smartctl --scan-open (covers SATA, NVMe, SAS, RAID controllers)
+    # --scan-open actually probes each device and returns only those it can
+    # communicate with, along with the correct -d type flag. This avoids
+    # misdetection (e.g. reporting -d scsi for a SATA disk behind SAT).
+    # Output format: /dev/sda -d sat # /dev/sda [SAT], ATA device
+    # Fallback to legacy glob if --scan-open yields nothing (smartctl < 5.40).
+    scan_output=$($SMARTCTL --scan-open 2>/dev/null) || true
+    if [ -z "$scan_output" ]; then
+        # Legacy fallback: enumerate common block device paths
+        case "$OS_TYPE" in
+            Darwin)
+                for dev in /dev/disk[0-9] /dev/disk[0-9][0-9]; do
+                    [ -b "$dev" ] && echo "$dev"
+                done ;;
+            *)
+                for dev in /dev/sd[a-z] /dev/sd[a-z][a-z] /dev/nvme[0-9]n1 /dev/nvme[0-9][0-9]n1; do
+                    [ -b "$dev" ] && echo "$dev"
+                done ;;
+        esac
+    else
+        echo "$scan_output"
+    fi | while IFS= read -r scan_line; do
+        # Skip empty lines and comments
+        [ -z "$scan_line" ] && continue
+
+        # Extract device path (first field) and -d type flag (second+third field)
+        dev=$(echo "$scan_line" | awk '{print $1}')
+        dtype_flag=$(echo "$scan_line" | awk '{print $2, $3}')
+
+        [ -z "$dev" ] && continue
+
+        # macOS: smartctl --scan-open returns IOService paths — shorten for display
+        # e.g. IOService:/AppleARMPE/arm-io/.../NS_01@1 → disk:NS_01@1
+        dev_display="$dev"
+        case "$dev" in
+            IOService:*) dev_display="disk:$(echo "$dev" | sed 's|.*/||')" ;;
+        esac
+
+        # Note: $dtype_flag is intentionally unquoted so "-d ata" word-splits
+        # into two separate arguments for smartctl.
+
+        # Get SMART info (skip if no access)
+        info=$($SMARTCTL -i $dtype_flag "$dev" 2>&1) || continue
+        echo "$info" | grep -qi "permission denied\|unable to detect\|not supported" && continue
+        
+        attrs=$($SMARTCTL -A $dtype_flag "$dev" 2>/dev/null) || true
+        health=$($SMARTCTL -H $dtype_flag "$dev" 2>/dev/null) || true
+        
+        # Extract basic info
+        serial=$(echo "$info" | grep -i "serial number" | cut -d: -f2 | xargs)
+        model=$(echo "$info" | grep -iE "device model|model number|product" | head -1 | cut -d: -f2 | xargs | tr ',' ' ')
+        
+        # Extract WWN (World Wide Name) - globally unique disk identifier
+        wwn=""
+        wwn_raw=$(echo "$info" | grep -iE "LU WWN Device Id|IEEE EUI-64|NGUID" | head -1 | cut -d: -f2-)
+        if [ -n "$wwn_raw" ]; then
+            wwn=$(echo "$wwn_raw" | tr -d ' ' | tr '[:upper:]' '[:lower:]')
+        fi
+        
+        # Capacity - use first non-zero match
+        capacity=""
+        while IFS= read -r cap_line; do
+            [ -z "$cap_line" ] && continue
+            val=$(echo "$cap_line" | grep -oE '[0-9,]+' | head -1 | tr -d ',')
+            if [ -n "$val" ] && [ "$val" != "0" ]; then
+                capacity="$val"
+                break
+            fi
+        done < <(echo "$info" | grep -iE "user capacity|total nvm capacity|namespace 1 size")
+
+        # macOS fallback: Apple NVMe doesn't report capacity via smartctl
+        if { [ -z "$capacity" ] || [ "$capacity" = "0" ]; } && [ "$OS_TYPE" = "Darwin" ] && [ -n "$serial" ]; then
+            sp_data=$(system_profiler SPNVMeDataType 2>/dev/null)
+            if [ -n "$sp_data" ] && echo "$sp_data" | grep -q "$serial"; then
+                capacity=$(echo "$sp_data" | grep -B20 -A20 "$serial" | grep -i "capacity" | head -1 | sed 's/.*(\([0-9.,]*\) bytes).*/\1/' | tr -d ',.')
+            fi
+        fi
+
+        # Firmware version
+        firmware=$(echo "$info" | grep -iE "firmware version" | head -1 | cut -d: -f2 | xargs)
+        
+        # Rotation rate
+        rpm_raw=$(echo "$info" | grep -iE "rotation rate" | head -1 | cut -d: -f2 | xargs)
+        if echo "$rpm_raw" | grep -qiE "solid state|not rotational"; then
+            rpm="0"
+        else
+            rpm=$(echo "$rpm_raw" | grep -oE '[0-9]+' | head -1)
+            [ -z "$rpm" ] && rpm=""
+        fi
+        
+        # Sector size
+        sector_size=$(echo "$info" | grep -iE "sector size" | head -1 | grep -oE '[0-9]+' | head -1)
+        [ -z "$sector_size" ] && sector_size=""
+        
+        # Detect type
+        if echo "$info" | grep -qi "nvme"; then
+            type="NVMe"
+        elif echo "$info" | grep -qi "rotation rate.*rpm"; then
+            type="HDD"
+        elif echo "$info" | grep -qi "solid state\|ssd"; then
+            type="SSD"
+        elif [ "$OS_TYPE" != "Darwin" ] && [ -f "/sys/block/$(basename $dev)/queue/rotational" ]; then
+            [ "$(cat /sys/block/$(basename $dev)/queue/rotational)" = "1" ] && type="HDD" || type="SSD"
+        elif [ -n "$rpm" ] && [ "$rpm" != "0" ]; then
+            type="HDD"
+        else
+            type="Unknown"
+        fi
+        
+        # SMART status
+        if echo "$health" | grep -qi "passed"; then
+            status="PASSED"
+        elif echo "$health" | grep -qi "failed"; then
+            status="FAILED"
+        else
+            status="N/A"
+        fi
+        
+        # Fallback serial
+        [ -z "$serial" ] && serial="$(hostname):$(basename $dev)"
+        
+        # Build JSON with ALL SMART attributes
+        json="{"
+        first=true
+        
+        if [ "$type" = "NVMe" ]; then
+            while IFS= read -r line; do
+                if echo "$line" | grep -qE '^\s*[A-Za-z].*:'; then
+                    key=$(echo "$line" | cut -d: -f1 | xargs | tr ' ' '_')
+                    val=$(echo "$line" | cut -d: -f2- | xargs)
+                    [ -z "$key" ] && continue
+                    num=$(echo "$val" | tr -d ',' | grep -oE '^[0-9]+' | head -1)
+                    if [ -n "$num" ]; then
+                        val="$num"
+                    else
+                        val=$(echo "$val" | tr '"' "'")
+                    fi
+                    $first && first=false || json="$json,"
+                    json="$json\"$key\":\"$val\""
+                fi
+            done <<< "$attrs"
+        else
+            while IFS= read -r line; do
+                if echo "$line" | grep -qE '^\s*[0-9]+\s+\S+\s+0x'; then
+                    name=$(echo "$line" | awk '{print $2}')
+                    raw=$(echo "$line" | awk '{print $10}' | grep -oE '^[0-9]+' | head -1)
+                    [ -z "$raw" ] && raw="0"
+                    $first && first=false || json="$json,"
+                    json="$json\"$name\":\"$raw\""
+                fi
+            done <<< "$attrs"
+        fi
+        json="$json}"
+        
+        # Escape for CSV
+        json_escaped=$(echo "$json" | sed 's/"/""/g')
+        
+        # Output CSV row
+        printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,"%s"\n' \
+            "$wwn" "$serial" "$dev_display" "$type" "$model" \
+            "${capacity:-0}" "$firmware" "${rpm}" "${sector_size}" \
+            "$status" "$json_escaped"
+        # Progress marker for installer spinner (only when stderr is redirected)
+        [ ! -t 2 ] && echo "DISK_DONE" >&2
+    done
+}
+
+# Interactive terminal check (no LOG_FILE = terminal output)
+INTERACTIVE=""
+[ -z "$LOG_FILE" ] && [ -t 2 ] && INTERACTIVE=1
+
+# Main
+if [ -n "$PUSH_URL" ]; then
+    # Push mode: collect and send to server
+    # Use --host if provided, otherwise fall back to hostname
+    if [ -z "$HOST_ID" ]; then
+        HOST_ID=$(hostname)
+    fi
+    # Random 0-25s delay to spread cron load (skipped in interactive terminals)
+    if ! [ -t 2 ]; then
+        DELAY_SECS=$((RANDOM % 25))
+        log "Delaying ${DELAY_SECS}s to spread load"
+        sleep "$DELAY_SECS"
+    fi
+
+    # Header
+    if [ -n "$INTERACTIVE" ]; then
+        ver_str="diskmind ${VERSION}"
+        [ -n "$COMMIT" ] && ver_str="${ver_str} (${COMMIT})"
+        printf "\n  ${BOLD}%s${NC}\n\n" "$ver_str"
+        printf "  ${GREEN}[PUSH]${NC} %s ${DIM}→${NC} %s\n\n" "$HOST_ID" "$PUSH_URL"
+        printf "  ${DIM}●${NC} Scanning..."
+    fi
+
+    CSV_DATA=$(collect_data)
+
+    # Check if we have data (more than just header)
+    LINE_COUNT=$(echo "$CSV_DATA" | wc -l)
+    DISK_COUNT=$((LINE_COUNT - 1))
+    if [ "$DISK_COUNT" -lt 1 ]; then
+        if [ -n "$INTERACTIVE" ]; then
+            printf "\r  ${RED}●${NC} Scanning     no disks found\n\n"
+        else
+            log_error "No disks found"
+        fi
+        exit 1
+    fi
+
+    [ -n "$INTERACTIVE" ] && printf "\r  ${GREEN}●${NC} Scanning     ${BOLD}%s${NC} disk(s) found\n" "$DISK_COUNT"
+
+    LAST_DISK_COUNT="?"
+    LAST_ERROR=""
+    BUFFERED_SENT=0
+
+    # Try to send current data
+    [ -n "$INTERACTIVE" ] && printf "  ${DIM}●${NC} Pushing..."
+    send_to_server "$CSV_DATA"
+    rc=$?
+    if [ $rc -eq 0 ]; then
+        if [ -n "$INTERACTIVE" ]; then
+            printf "\r  ${GREEN}●${NC} Pushing      ${GREEN}${BOLD}OK${NC}\n"
+        else
+            log "Pushed $LAST_DISK_COUNT disk(s) to $PUSH_URL"
+        fi
+        # Also try to send any buffered data
+        send_buffered
+        if [ -n "$INTERACTIVE" ] && [ "$BUFFERED_SENT" -gt 0 ]; then
+            printf "  ${GREEN}●${NC} Buffered     ${BOLD}%s${NC} file(s) sent\n" "$BUFFERED_SENT"
+        fi
+        [ -n "$INTERACTIVE" ] && printf "\n"
+        exit 0
+    elif [ $rc -eq 2 ]; then
+        # Rejected by server (e.g. host configured as SSH) - don't buffer
+        if [ -n "$INTERACTIVE" ]; then
+            printf "\r  ${RED}●${NC} Pushing      ${RED}${BOLD}FAILED${NC}\n"
+            printf "    ${DIM}%s${NC}\n\n" "$LAST_ERROR"
+        else
+            log_error "$LAST_ERROR"
+        fi
+        exit 1
+    else
+        # Server unreachable, buffer the data
+        if [ -n "$INTERACTIVE" ]; then
+            printf "\r  ${RED}●${NC} Pushing      ${RED}${BOLD}FAILED${NC}\n"
+            printf "    ${DIM}%s${NC}\n" "${LAST_ERROR:-Server unreachable}"
+            printf "    ${DIM}Data saved locally, will retry on next scan${NC}\n\n"
+        else
+            log_error "${LAST_ERROR:-Server unreachable}, data buffered for retry"
+        fi
+        buffer_data "$CSV_DATA"
+        exit 1
+    fi
+else
+    # Normal mode: output to stdout
+    collect_data
+fi
