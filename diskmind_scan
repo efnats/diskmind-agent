@@ -32,8 +32,13 @@ esac
 while [[ $# -gt 0 ]]; do
     case $1 in
         --push)
-            PUSH_URL="$2"
-            shift 2
+            if [ -n "${2:-}" ] && [[ ! "$2" =~ ^-- ]]; then
+                PUSH_URL="$2"
+                shift 2
+            else
+                PUSH_URL="https://diskmind.net"
+                shift
+            fi
             ;;
         --host)
             HOST_ID="$2"
@@ -57,7 +62,7 @@ while [[ $# -gt 0 ]]; do
             echo "Collects SMART data from local disks."
             echo ""
             echo "Options:"
-            echo "  --push URL       Push data to diskmind server instead of stdout"
+            echo "  --push [URL]     Push data to server (default: https://diskmind.net)"
             echo "                   Example: --push http://192.168.1.100:8085"
             echo "  --host HOST      Host identifier for push mode (default: hostname)"
             echo "                   Use IP if that's what's in your diskmind config"
