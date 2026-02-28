@@ -2,7 +2,7 @@
 # diskmind_scan - Node Agent
 # Outputs SMART data as CSV to stdout, or pushes to server with --push
 
-VERSION="2.2"
+VERSION="2.3"
 COMMIT=""
 
 # OS detection
