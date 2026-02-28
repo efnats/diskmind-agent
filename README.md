@@ -1,7 +1,5 @@
 # diskmind-agent
 
-[![Website](https://img.shields.io/badge/WEBSITE-DISKMIND.NET-blue?style=for-the-badge)](https://diskmind.net) [![GitHub](https://img.shields.io/badge/GITHUB-REPOSITORY-333?style=for-the-badge&logo=github)](https://github.com/efnats/diskmind-agent)
-
 Push agent for [diskmind.net](https://diskmind.net) - SMART disk health monitoring for Linux and macOS.
 
 Collects SMART data from your drives via `smartctl` and pushes it to your diskmind dashboard.
