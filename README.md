@@ -1,5 +1,7 @@
 # diskmind-agent
 
+[![diskmind.net](https://img.shields.io/badge/diskmind.net-blue?style=for-the-badge)](https://diskmind.net)
+
 Push agent for [diskmind.net](https://diskmind.net) - SMART disk health monitoring for Linux and macOS.
 
 Collects SMART data from your drives via `smartctl` and pushes it to your diskmind dashboard.
