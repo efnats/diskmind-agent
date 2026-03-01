@@ -4,6 +4,8 @@ Push agent for [diskmind.net](https://diskmind.net) - SMART disk health monitori
 
 Collects SMART data from your drives via `smartctl` and pushes it to your diskmind dashboard.
 
+![diskmind dashboard](screenshot.png)
+
 ## Quick start
 
 ```bash
