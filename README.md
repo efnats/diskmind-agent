@@ -14,7 +14,7 @@ sudo chmod +x /usr/local/bin/diskmind_scan
 sudo diskmind_scan --push
 ```
 
-On first run, you'll get a link code to authorize your server. Just sign up at [diskmind.net](https://diskmind.net), go to `/link`, and enter the code.
+On first run, you'll see a link and a code. Just click the link, enter the code, and you're done.
 
 ## Requirements
 
