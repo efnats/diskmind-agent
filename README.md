@@ -14,13 +14,7 @@ sudo chmod +x /usr/local/bin/diskmind_scan
 sudo diskmind_scan --push
 ```
 
-On first run, you'll be prompted for your API token. Sign up at [diskmind.net](https://diskmind.net) and find it under **Settings > API Tokens**.
-
-## Automate with cron
-
-```bash
-echo "*/15 * * * * root /usr/local/bin/diskmind_scan --push --log /var/log/diskmind.log" | sudo tee /etc/cron.d/diskmind
-```
+On first run, you'll be prompted for your API token and cron setup. Sign up at [diskmind.net](https://diskmind.net) and find your token under **Settings > API Tokens**.
 
 ## Requirements
 
