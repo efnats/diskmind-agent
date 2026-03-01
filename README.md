@@ -14,7 +14,7 @@ sudo chmod +x /usr/local/bin/diskmind_scan
 sudo diskmind_scan --push
 ```
 
-On first run, you'll see a link and a code. Just click the link, enter the code, and you're done.
+On first run, you'll see a link and a code. Just click the link, register, enter the code, and you're done.
 
 ## Requirements
 
