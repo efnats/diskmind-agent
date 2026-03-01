@@ -120,7 +120,7 @@ if [ -n "$PUSH_URL" ] && [ -z "$PUSH_TOKEN" ]; then
                 sleep 5
                 _elapsed=$(( $(date +%s) - _poll_start ))
                 if [ "$_elapsed" -ge 600 ]; then
-                    printf "\r  ${RED}Timed out${NC} — run again to get a new code.\n\n"
+                    printf "\r  ${RED}Timed out${NC} - run again to get a new code.\n\n"
                     exit 1
                 fi
 
@@ -143,13 +143,13 @@ if [ -n "$PUSH_URL" ] && [ -z "$PUSH_TOKEN" ]; then
                     _authorized=1
                     break
                 elif [ "$_verify_http" = "410" ]; then
-                    printf "\r  ${RED}Code expired${NC} — run again to get a new code.\n\n"
+                    printf "\r  ${RED}Code expired${NC} - run again to get a new code.\n\n"
                     exit 1
                 fi
                 # 428 = still pending, keep polling
             done
         else
-            # Server doesn't support device flow — fall back to manual token prompt
+            # Server doesn't support device flow - fall back to manual token prompt
             printf "\n  No API token found.\n"
             printf "  Sign up at %s and go to\n" "$PUSH_URL"
             printf "  Settings → API Tokens to get one.\n\n"
@@ -230,10 +230,10 @@ send_to_server() {
     server_error=$(echo "$body" | sed 's/.*"error"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
     
     case "$http_code" in
-        401) LAST_ERROR="Authentication failed — check your token" ;;
-        403) LAST_ERROR="Access denied — ${server_error}" ;;
-        400) LAST_ERROR="Invalid data — ${server_error}" ;;
-        429) LAST_ERROR="Too many requests — try again later" ;;
+        401) LAST_ERROR="Authentication failed - check your token" ;;
+        403) LAST_ERROR="Access denied - ${server_error}" ;;
+        400) LAST_ERROR="Invalid data - ${server_error}" ;;
+        429) LAST_ERROR="Too many requests - try again later" ;;
         502|503|504) LAST_ERROR="Server is temporarily unavailable" ;;
         *)   LAST_ERROR="Server responded with an error (HTTP ${http_code})" ;;
     esac
@@ -321,7 +321,7 @@ send_buffered() {
         return 0
     fi
 
-    # Auth rejected — delete files, no point retrying
+    # Auth rejected - delete files, no point retrying
     if [ "$http_code" = "401" ] || [ "$http_code" = "403" ]; then
         for file in "${files[@]}"; do
             rm -f "$file"
@@ -387,7 +387,7 @@ collect_data() {
 
         [ -z "$dev" ] && continue
 
-        # macOS: smartctl --scan-open returns IOService paths — shorten for display
+        # macOS: smartctl --scan-open returns IOService paths - shorten for display
         # e.g. IOService:/AppleARMPE/arm-io/.../NS_01@1 → disk:NS_01@1
         dev_display="$dev"
         case "$dev" in
