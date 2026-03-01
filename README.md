@@ -14,7 +14,7 @@ sudo chmod +x /usr/local/bin/diskmind_scan
 sudo diskmind_scan --push
 ```
 
-On first run, you'll be prompted for your API token and cron setup. Sign up at [diskmind.net](https://diskmind.net) and find your token under **Settings > API Tokens**.
+On first run, you'll get a link code to authorize your server. Just sign up at [diskmind.net](https://diskmind.net), go to `/link`, and enter the code.
 
 ## Requirements
 
