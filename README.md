@@ -14,7 +14,7 @@ sudo chmod +x /usr/local/bin/diskmind_scan
 sudo diskmind_scan --push
 ```
 
-On first run, you'll see a link and a code. Just click the link, register, enter the code, and you're done.
+On first run, the agent walks you through setup - create an account at [diskmind.net](https://diskmind.net) and link your server with a one-time code.
 
 ## Requirements
 
